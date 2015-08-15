@@ -109,6 +109,25 @@ dispatcher<shape*, shape*, bool> shape::_is_intersecting;
 dispatcher<shape*, shape*, mm::vec2> shape::_intersect;
 bool shape::is_setup = false;
 
+class MM_16_BYTE_ALIGNED point : public shape
+{
+public:
+  mm::vec3 pos;
+
+  static int get_class_idx( )
+  {
+    static int idx = 0;
+    return idx;
+  }
+
+  int get_class_index( ) const
+  {
+    return get_class_idx( );
+  }
+
+  point( const mm::vec3& p ) : pos) (p) {}
+};
+
 class MM_16_BYTE_ALIGNED ray : public shape
 {
 public:
@@ -298,8 +317,78 @@ public:
     return get_class_idx();
   }
 
+  float surface_area()
+  {
+    mm::vec3 delta = max - min;
+    return 2 * (delta.x * delta.y + delta.y * delta.z + delta.x * delta.z);
+  }
+
+  float volume()
+  {
+    mm::vec3 delta = max - min;
+    return delta.x * delta.y * delta.z;
+  }
+
+  //returns the axis on which the aabb is the biggest
+  int dominating_axis()
+  {
+    mm::vec3 diag = max - min;
+    
+    if( diag.x > diag.y && diag.x > diag.z )
+      return 0; //x axis
+    else if( diag.y > diag.z )
+      return 1; //y axis
+    else
+      return 2; //z axis
+  }
+
+  //return relative to the min (0) and max (1)
+  //where a point is in the aabb
+  mm::vec3 offset( const mm::vec3& p )
+  {
+    mm::vec3 mindiff = p - min;
+    mm::vec3 minmaxdiff = max - min;
+    return mindiff / minmaxdiff;
+  }
+
+  sphere bounding_sphere()
+  {
+    sphere s;
+    s.set_center( (min + max) * 0.5f );
+    s.set_radius( mm::distance( s.get_center(), max ) );
+    return s;
+  }
+
+  static aabb transform(const aabb& ab, const mm::mat4& transformation)
+  {
+    aabb tmp;
+    static std::vector< mm::vec3 > v;
+    v.clear();
+    ab.get_points( v );
+    
+    for( auto& c : v )
+    {
+      tmp.expand( transform_point( mm::vec4( c, 1 ), transformation ) );
+    }
+
+    return tmp;
+  }
+
+  //fills v with the 8 points of the aabb
+  void get_points( std::vector<mm::vec3>& v ) const
+  {
+    v.push_back( mm::vec3( min.x, min.y, min.z ) );
+    v.push_back( mm::vec3( min.x, min.y, max.z ) );
+    v.push_back( mm::vec3( min.x, max.y, min.z ) );
+    v.push_back( mm::vec3( min.x, max.y, max.z ) );
+    v.push_back( mm::vec3( max.x, min.y, min.z ) );
+    v.push_back( mm::vec3( max.x, min.y, max.z ) );
+    v.push_back( mm::vec3( max.x, max.y, min.z ) );
+    v.push_back( mm::vec3( max.x, max.y, max.z ) );
+  }
+
   //returns the vertices of the triangles of the aabb in counter clockwise order
-  void get_vertices( std::vector<mm::vec3>& v ) const
+  void get_triangles( std::vector<mm::vec3>& v ) const
   {
     //left
     v.push_back( mm::vec3( min.x, max.yz ) );
@@ -421,7 +510,7 @@ class MM_16_BYTE_ALIGNED frustum : public shape
 {
 public:
   plane planes[6];
-  mm::vec3 points[8];
+  mm::vec4 points[8];
 
   enum which_plane
   {
@@ -450,37 +539,11 @@ public:
 
   void set_up( const mm::camera<float>& cam, const mm::frame<float>& f )
   {
-    mm::vec3 nc = cam.pos - cam.view_dir * f.near_ll.z;
-    mm::vec3 fc = cam.pos - cam.view_dir * f.far_ll.z;
+    std::vector<mm::vec4> tmp_points;
+    tmp_points.reserve(8);
 
-    mm::vec3 right = -mm::normalize( mm::cross( cam.up_vector, cam.view_dir ) );
-
-    float nw = f.near_lr.x - f.near_ll.x;
-    float nh = f.near_ul.y - f.near_ll.y;
-
-    float fw = f.far_lr.x - f.far_ll.x;
-    float fh = f.far_ul.y - f.far_ll.y;
-
-    //near top left
-    mm::vec3 ntl = nc + cam.up_vector * nh - right * nw;
-    mm::vec3 ntr = nc + cam.up_vector * nh + right * nw;
-    mm::vec3 nbl = nc - cam.up_vector * nh - right * nw;
-    mm::vec3 nbr = nc - cam.up_vector * nh + right * nw;
-
-    mm::vec3 ftl = fc + cam.up_vector * fh - right * fw;
-    mm::vec3 ftr = fc + cam.up_vector * fh + right * fw;
-    mm::vec3 fbl = fc - cam.up_vector * fh - right * fw;
-    mm::vec3 fbr = fc - cam.up_vector * fh + right * fw;
-
-    points[NTL] = ntl;
-    points[NTR] = ntr;
-    points[NBL] = nbl;
-    points[NBR] = nbr;
-
-    points[FTL] = ftl;
-    points[FTR] = ftr;
-    points[FBL] = fbl;
-    points[FBR] = fbr;
+    get_frustum_corners( tmp_points, mm::inverse( f.projection_matrix * cam.get_matrix() ) );
+    memcpy( &points[0].x, &tmp_points[0].x, tmp_points.size() * sizeof(mm::vec4) );
 
     planes[TOP].set_up( ntr, ntl, ftl );
     planes[BOTTOM].set_up( nbl, nbr, fbr );
@@ -490,7 +553,7 @@ public:
     planes[FAR].set_up( ftr, ftl, fbl );
   }
 
-  void get_vertices( std::vector<mm::vec3>& v ) const
+  void get_vertices( std::vector<mm::vec4>& v ) const
   {
     //top
     v.push_back( points[NTL] );
@@ -559,10 +622,7 @@ namespace inner
     float dist = b->distance( a->get_center() );
     //dist + radius == how far is the sphere from the plane (usable when we want to do lod using the near plane)
 
-    if( dist < -a->get_radius() )
-      return false;
-
-    return true;
+    return dist >= -a->get_radius();
   }
 
   static bool is_on_right_side_ps( shape* aa, shape* bb )
@@ -576,10 +636,7 @@ namespace inner
     auto a = static_cast<aabb*>( aa );
     auto b = static_cast<plane*>( bb );
 
-    if( b->distance( a->get_pos_vertex( b->get_normal() ) ) < 0 )
-      return false;
-
-    return true;
+    return b->distance( a->get_pos_vertex( b->get_normal() ) ) >= 0;
   }
 
   static bool is_on_right_side_pa( shape* aa, shape* bb )
@@ -597,10 +654,7 @@ namespace inner
 
     float rad_sum = b->get_radius() + a->get_radius();
 
-    if( dist > rad_sum * rad_sum ) //squared distance check
-      return false;
-
-    return true;
+    return dist <= rad_sum * rad_sum; //squared distance check
   }
 
   //checks if a sphere intersects a plane
@@ -611,10 +665,7 @@ namespace inner
 
     float dist = b->distance( a->get_center() );
 
-    if( abs( dist ) <= a->get_radius() )
-      return true;
-
-    return false;
+    return abs( dist ) <= a->get_radius();
   }
 
   static bool is_intersecting_ps( shape* aa, shape* bb )
@@ -634,10 +685,7 @@ namespace inner
     //that is the two normals are parallel
     // sin(alpha) = 0
     // ==> |a| * |b| * sin(alpha) = 0
-    if( mm::all( mm::equal( vector, mm::vec3( 0 ) ) ) )
-      return false;
-
-    return true;
+    return !mm::all( mm::equal( vector, mm::vec3( 0 ) ) );
   }
 
   static bool is_intersecting_aa( shape* aa, shape* bb )
@@ -650,16 +698,10 @@ namespace inner
     mm::vec3 aextent = a->get_extents();
     mm::vec3 bextent = b->get_extents();
 
-    if( abs( t.x ) > ( aextent.x + bextent.x ) )
-      return false;
+    mm::vec3 abs_t = abs( t );
+    mm::vec3 a_plus_b = aextent + bextent;
 
-    if( abs( t.y ) > ( aextent.y + bextent.y ) )
-      return false;
-
-    if( abs( t.z ) > ( aextent.z + bextent.z ) )
-      return false;
-
-    return true;
+    return mm::all( mm::lessThanEqual( abs_t, a_plus_b ) );
   }
 
   static bool is_intersecting_as( shape* aa, shape* bb )
@@ -672,10 +714,7 @@ namespace inner
 
     float sqlength = mm::dot( vec, vec );
 
-    if( sqlength > b->get_radius() * b->get_radius() )
-      return false;
-
-    return true;
+    return sqlength <= b->get_radius() * b->get_radius();
   }
 
   static bool is_intersecting_sa( shape* aa, shape* bb )
@@ -694,11 +733,8 @@ namespace inner
     float dist_p = b->distance( p );
     float dist_n = b->distance( n );
 
-    if( ( dist_n > 0 && dist_p > 0 ) ||
-      ( dist_n < 0 && dist_p < 0 ) )
-      return false;
-
-    return true;
+    return !( ( dist_n > 0 && dist_p > 0 ) ||
+      ( dist_n < 0 && dist_p < 0 ) );
   }
 
   static bool is_intersecting_pa( shape* aa, shape* bb )
@@ -729,16 +765,13 @@ namespace inner
     auto a = static_cast<frustum*>( aa );
     auto b = static_cast<aabb*>( bb );
 
-    bool res = true;
     for( int c = 0; c < 6; ++c )
     {
       if( !bb->is_on_right_side( &a->planes[c] ) )
-      {
-        res = false;
-        break;
-      }
+        return false;
     }
-    return res;
+    
+    return true;
   }
 
   static bool is_intersecting_af( shape* aa, shape* bb )
@@ -755,10 +788,7 @@ namespace inner
     mm::vec3 spheremax = a->get_center() + a->get_radius();
     mm::vec3 spheremin = a->get_center() - a->get_radius();
 
-    if( mm::all( mm::lessThanEqual( spheremax, b->max ) ) && mm::all( mm::greaterThanEqual( spheremin, b->min ) ) )
-      return true;
-
-    return false;
+    return ( mm::all( mm::lessThanEqual( spheremax, b->max ) ) && mm::all( mm::greaterThanEqual( spheremin, b->min ) ) );
   }
 
   //is a inside b?
@@ -773,10 +803,7 @@ namespace inner
     float sqrminlength = mm::dot( minvec, minvec );
     float sqrradius = b->get_radius() * b->get_radius();
 
-    if( sqrmaxlength <= sqrradius && sqrminlength <= sqrradius )
-      return true;
-
-    return false;
+    return ( sqrmaxlength <= sqrradius && sqrminlength <= sqrradius );
   }
 
   //is a inside b?
@@ -785,10 +812,7 @@ namespace inner
     auto a = static_cast<aabb*>( aa );
     auto b = static_cast<aabb*>( bb );
 
-    if( mm::all( mm::greaterThanEqual( a->min, b->min ) ) && mm::all( mm::lessThanEqual( a->max, b->max ) ) )
-      return true;
-
-    return false;
+    return ( mm::all( mm::greaterThanEqual( a->min, b->min ) ) && mm::all( mm::lessThanEqual( a->max, b->max ) ) );
   }
 
   //is a inside b?
@@ -799,10 +823,7 @@ namespace inner
 
     mm::vec3 spheredist = b->get_center() - a->get_center();
 
-    if( mm::dot( spheredist, spheredist ) <= b->get_radius() * b->get_radius() )
-      return true;
-
-    return false;
+    return ( mm::dot( spheredist, spheredist ) <= b->get_radius() * b->get_radius() );
   }
 
   static bool is_intersecting_rt( shape* aa, shape* bb )
@@ -950,7 +971,7 @@ namespace inner
     float largest_tmin = mm::max( mm::max( tmin.x, tmin.y ), mm::max( tmin.x, tmin.z ) );
     float smallest_tmax = mm::min( mm::min( tmax.x, tmax.y ), mm::min( tmax.x, tmax.z ) );
 
-    return smallest_tmax > largest_tmin ? true : false;
+    return smallest_tmax > largest_tmin;
   }
 
   static mm::vec2 intersect_ra( shape* aa, shape* bb )
@@ -1053,19 +1074,29 @@ namespace inner
   {
     return intersect_rp( bb, aa );
   }
+
+  static bool is_inside_poa( shape* aa, shape* bb )
+  {
+    auto a = static_cast<point*>( aa );
+    auto b = static_cast<aabb*>( bb );
+
+    return mm::all( mm::lessThanEqual( a->pos, b->max ) ) && mm::all( mm::greaterThanEqual( a->pos, b->min ) );
+  }
 }
 
 void shape::set_up_intersection()
 {
+  const int num_shapes = 7;
+
   //order doesnt matter
-  _is_on_right_side.set_elements( 6 );
+  _is_on_right_side.set_elements( num_shapes );
   _is_on_right_side.add<sphere, plane>( inner::is_on_right_side_sp );
   _is_on_right_side.add<aabb, plane>( inner::is_on_right_side_ap );
   _is_on_right_side.add<plane, sphere>( inner::is_on_right_side_ps );
   _is_on_right_side.add<plane, aabb>( inner::is_on_right_side_pa );
 
   /////////////
-  _is_intersecting.set_elements( 6 );
+  _is_intersecting.set_elements( num_shapes );
   _is_intersecting.add<aabb, aabb>( inner::is_intersecting_aa );
   _is_intersecting.add<aabb, sphere>( inner::is_intersecting_as );
   _is_intersecting.add<aabb, ray>( inner::is_intersecting_ar );
@@ -1095,13 +1126,14 @@ void shape::set_up_intersection()
   _is_intersecting.add<triangle, ray>( inner::is_intersecting_tr );
 
   //order matters
-  _is_inside.set_elements( 6 );
+  _is_inside.set_elements( num_shapes );
   _is_inside.add<aabb, aabb>( inner::is_inside_aa );
   _is_inside.add<aabb, sphere>( inner::is_inside_as );
   _is_inside.add<sphere, aabb>( inner::is_inside_sa );
   _is_inside.add<sphere, sphere>( inner::is_inside_ss );
+  _is_inside.add<point, aabb>( inner::is_inside_poa );
 
-  _intersect.set_elements( 6 );
+  _intersect.set_elements( num_shapes  );
   _intersect.add<aabb, ray>( inner::intersect_ar );
   _intersect.add<ray, aabb>( inner::intersect_ra );
   _intersect.add<plane, ray>( inner::intersect_pr );
